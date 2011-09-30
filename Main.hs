@@ -21,15 +21,21 @@ clkRes :: Double
 clkRes = 1000
 
 xMin :: Float
-xMin = -0.9
+xMin = -5.0
 
 xMax :: Float
-xMax = 0.9
+xMax = 5.0
 
-stateToVector3 pos = let x = (realToFrac $ FRP.point2X pos)::GLfloat
-                         y = (realToFrac $ FRP.point2Y pos)::GLfloat
-                     in
-                       Vector3 x y 0.0
+accFac :: Float
+accFac = 10
+
+velFac :: Float
+velFac = 5
+
+stateToVector3 pos z = let x = (realToFrac $ FRP.point2X pos)::GLfloat
+                           y = (realToFrac $ FRP.point2Y pos)::GLfloat
+                       in
+                         Vector3 x y z
 
 data SphereState = SphereState { ssPos :: !Position2
                                , ssDPos :: !Position2
@@ -48,22 +54,22 @@ idle rh tRef = do
   writeIORef tRef currentTime
   return ()
 
-actuate :: ReactHandle a b -> Bool -> SphereState -> IO Bool
+actuate :: ReactHandle a b -> Bool -> [SphereState] -> IO Bool
 actuate _ _ noos  = do
   clear [ ColorBuffer, DepthBuffer ]
-  loadIdentity
 
-  preservingMatrix (do
-                     translate $ stateToVector3 $ ssDPos noos
-                     color (Color3 0.3 0.3 (0.3::GLfloat))
-                     renderObject Solid (Sphere' 0.05 8 2)
-                   )
-
-  preservingMatrix (do
-                     translate $ stateToVector3 $ ssPos noos
-                     color (Color3 1.0 0.0 (0.0::GLfloat))
-                     renderObject Solid (Sphere' 0.05 8 2)
-                   )
+  mapM (\noo -> do
+          preservingMatrix (do
+                             translate $ stateToVector3 (ssDPos noo) 0.0
+                             color (Color3 0.1 0.1 (0.1::GLfloat))
+                             renderObject Solid (Sphere' 0.1 8 2)
+                           )
+          preservingMatrix (do
+                             translate $ stateToVector3 (ssPos noo) 0.0
+                             color (Color3 1.0 0.0 (0.0::GLfloat))
+                             renderObject Solid (Sphere' 0.1 8 2)
+                           )
+       ) noos
   swapBuffers
 
   return False
@@ -78,22 +84,37 @@ simpleSphere :: (RandomGen g0, RandomGen g1) => g0 -> g1 -> Position2 -> SimpleS
 simpleSphere gx gy (FRP.Point2 x0 y0) = proc gi -> do
                                       rec
                                                -- Pick a position
-                                               smpl <- repeatedly 5 () -< ()
+                                               smpl <- repeatedly 3 () -< ()
                                                (rx,ry) <- (noiseR (xMin, xMax) gx) &&& (noiseR (xMin, xMax) gy) -< ()
                                                dx <- hold (x0) -< smpl `tag` rx
                                                dy <- hold (y0) -< smpl `tag` ry
 
-                                               let ax = 10 * (dx - x) - 8 * vx
+                                               let ax = accFac * (dx - x) - velFac * vx
                                                vx <- integral -< ax
                                                x <- (x0+) ^<< integral -< vx
 
-                                               let ay = 10 * (dy - y) - 8 * vy
+                                               let ay = accFac * (dy - y) - velFac * vy
                                                vy <- integral -< ay
                                                y <- (y0+) ^<< integral -< vy
 
                                       returnA -< SphereState { ssPos = (FRP.Point2 x y)
                                                              , ssDPos = (FRP.Point2 dx dy)
                                                              }
+
+reshape :: ReshapeCallback
+reshape size@(Size w h) = do
+  let vp = 0.8
+      aspect = fromIntegral w / fromIntegral h
+  
+  viewport $= (Position 0 0, size)
+
+  matrixMode $= Projection
+  loadIdentity
+  frustum (-vp) vp (-vp / aspect) (vp / aspect) 3 50
+
+  matrixMode $= Modelview 0
+  loadIdentity
+  translate (Vector3 0 0 (-20 :: GLfloat))
 
 main :: IO ()
 main = do
@@ -105,12 +126,15 @@ main = do
   t <- get elapsedTime
   timeRef <- newIORef t
 
-  let iv = FRP.Point2 0 0
-      gen_x = mkStdGen 10
-      gen_y = mkStdGen 10
-
-  rh <- reactInit (initr) (actuate) (simpleSphere gen_x gen_y iv)
+  rh <- reactInit (initr) (actuate) (parB (map (\i -> let g0 = mkStdGen (i*21903821093810 `mod` 200)
+                                                          (x, g1) = randomR (xMin, xMax) g0
+                                                          (y, g2) = randomR (xMin, xMax) g1
+                                                          pos = FRP.Point2 x y
+                                                      in
+                                                        simpleSphere g1 g2 pos)
+                                           [0..3]))
 
   displayCallback $= (do return ())
   idleCallback $= Just (idle rh timeRef)
+  reshapeCallback $= Just reshape
   mainLoop
